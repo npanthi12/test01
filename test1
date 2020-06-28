@@ -1,0 +1,847 @@
+### Example program to generate data and select NCC
+
+set.seed(123)
+library(survival)
+library(tidyverse)
+library(gtools)
+library(corpcor) # for making positive definite matrix 
+
+# Programs to source in 
+source.path <- "/home/c289454/Nested-Case-Control/PROGRAMS/DEV/Functions/20200608"
+# Also on J: drive at
+source.path <- "J:/EL/ABEMACICLIB/SOW_037/PROGRAMS/Nested Case-Control/INT/Functions/20200608"
+
+source(file.path(source.path, "Cohort_data_sim_function_YJ_06102020.R"))
+# Function to generate Data -----------------------------------------------
+
+generate_data <- function(n.rows = 5000,
+                          n.biomark = 2,
+                          p.biomark = rep(0.5, n.biomark),
+                          biomark.HR = rep(1, n.biomark),
+                          n.bin = 2,
+                          bin.props = rep(0.5,n.bin),
+                          n.normal = 2,
+                          normal.means = rep(0,n.normal),
+                          normal.sds = rep(1,n.normal),
+                          n.multilevel = 0, #06062020
+                          multi.levels = NULL, # 06092020
+                          multi.props = NULL,  # 06092020                                           
+                          correlation.matrix = matrix(diag(n.biomark+n.bin+n.normal+n.multilevel),   ### 06092020
+                                                      nrow = n.biomark + n.bin + n.normal + n.multilevel,
+                                                      dimnames = list(c(paste0("Bmk",LETTERS[1:n.biomark]),
+                                                                        "treatment",
+                                                                        if(n.bin + n.normal + n.multilevel > 1){ paste0("X", 1:(n.bin + n.normal + n.multilevel - 1))}else{NULL}),
+                                                                      c(paste0("Bmk",LETTERS[1:n.biomark]),
+                                                                        "treatment",
+                                                                        if(n.bin + n.normal + n.multilevel > 1){ paste0("X", 1:(n.bin + n.normal + n.multilevel - 1))}else{NULL}))),
+                          case.prop = 0.075,
+                          covariate.HRs = rep(1,n.bin+n.normal+
+                                                ifelse(n.multilevel>0, sum(multi.levels-1), 0)), #06092020
+                          p.treatment = 0.5,
+                          interaction.HR = c(rep(1,n.biomark))){
+  
+  # Creates a simulated dataset with defaults as the specs of the PROMA Cohort
+  #  
+  # Args: 
+  #  n.rows: number of rows the dataset should have
+  #  n.biomark: Number of exposure biomarkers to include
+  #  p.biomark: vector of biomarker proportions
+  #  biomark.HR: HAzard Ratio between biomarkers and Case Status
+  #  n.bin: number of binary variables (excluding Case)
+  #  bin.probs: proportions for those binary variables
+  #  n.normal: number of normal variables to simulate
+  #  normal.means: vector of means for the normal variables
+  #  normal.sds: vector of standard deviations for the normal variables
+  #  n.multilevel: single numeric value to indicate the number of multi-level columns
+  #  multi.levels: vector the length of the number of multi-level columns to indicate the number of categories
+  #  multi.props: a list with a vector of proportions corresponding to each category 
+  #  correlation.matrix: a positive-definite matrix that specifies the
+  #                      correlation structure
+  #  case.prop:  Proportion of Cases
+  #  covariate.HRs:  Hazard Ratios between variables and Case status
+  #  p.treatment: allocation of treatment/placebo 
+  #  trt.HR: main effect HR of treatment
+  #  interaction.HR:  interaction HR for each of the biomarker*trt interactions
+  
+  # Input checks - outdated but may be useful later
+  # if (length(bin.props) != n.bin)
+  #   stop("A proportion must be specified for all binary variables")
+  # if (length(normal.means) < n.normal & n.normal != 0)
+  #   stop("All normal variables must have a mean")
+  # if(length(normal.sds) < n.normal & n.normal != 0)
+  #   stop("All normal variables must have a standard deviation")
+  # if(length(covariate.HRs) != (n.bin + n.normal))
+  #   stop("Case Status must have an association with each variable. HR of 1 indicates no association")
+  # if(is.null(colnames(correlation.matrix)))
+  #   warning("Correlation matrix needs column names to output a meaningful dataset")
+  # 
+  
+  # Must name columns of correlation matrix.  One must be treatment
+  if(sum(colnames(correlation.matrix) == "treatment") == 0){
+    stop("Must include treatment in binary variables")
+  }
+  
+  # Necessary packages  
+  require(tidyverse)
+  require(BinNor)
+  # Number of normal variables to create
+  n.normal.sim <- n.normal + n.multilevel 
+  # Create multi-level from normal variables
+  if(n.multilevel > 0){
+    normal.means <- c(normal.means, rep(0, n.multilevel))
+    normal.sds <- c(normal.sds, rep(1, n.multilevel))
+  }
+  
+  # Generate binary and normal data jointly (Case,Black, LogPSA, Age)
+  if (n.bin > 0 & n.normal.sim > 0){
+    gen_data <- jointly.generate.binary.normal(no.rows = n.rows,
+                                               no.bin = n.biomark + n.bin,
+                                               prop.vec.bin = c(p.biomark, bin.props),
+                                               no.nor = n.normal.sim,
+                                               mean.vec.nor = normal.means,
+                                               var.nor = normal.sds**2,
+                                               corr.mat = correlation.matrix)
+  }else if (n.bin == 0 & n.normal.sim > 0){
+    gen_data <- jointly.generate.binary.normal(no.rows = n.rows,
+                                               no.bin = n.biomark,
+                                               prop.vec.bin = p.biomark,
+                                               no.nor = n.normal.sim,
+                                               mean.vec.nor = normal.means,
+                                               var.nor = normal.sds**2,
+                                               corr.mat = correlation.matrix)
+  }else if (n.bin > 0 & n.normal.sim == 0){
+    gen_data <- jointly.generate.binary.normal(no.rows = n.rows,
+                                               no.bin = n.biomark + n.bin,
+                                               prop.vec.bin = c(p.biomark, bin.props),
+                                               no.nor = n.normal.sim,
+                                               corr.mat = correlation.matrix)
+  }
+  
+  # Name data with names from corr matrix
+  colnames(gen_data) <- colnames(correlation.matrix)
+  
+  gen_data <- data.frame(gen_data)
+  
+  # Divide multi-level variables
+  if(n.multilevel > 0){
+    # Set up the cutpoints
+    if(is.null(multi.props)){
+      cut.points <- lapply(multi.levels, function(x) seq(0, 1, 1/x))
+    }else{
+      # Cutpoints if specified
+      cut.points <- lapply(multi.props, function(x) c(0, cumsum(x)))
+      cut.points <- 
+        lapply(cut.points, function(x){ 
+          if(x[length(x)] != 1){
+            x[length(x)] = 1
+          }else{
+            x
+          }
+          return(x)
+        })
+    }
+    # Normal quantiles of cutpoints
+    norm.cuts <- lapply(cut.points, qnorm)
+    # Grab the columns to be made multilevel
+    multi_con_col <- as.data.frame(gen_data[, (n.biomark + n.bin + n.normal + 1):(n.biomark + n.bin + n.normal + n.multilevel)])
+    # Make the columns multi-level
+    cat_columns <- 
+      lapply(seq_along(multi_con_col), 
+             function(k){
+               cut(multi_con_col[, k], norm.cuts[[k]], LETTERS[1:multi.levels[k]])
+             }) %>% bind_cols()
+    # Assign names
+    names(cat_columns) <- names(gen_data)[(n.biomark + n.bin + n.normal + 1):(n.biomark + n.bin + n.normal + n.multilevel)]
+    # Replace the multilevel - (normal) columns with categorized versions
+    gen_data[, (n.biomark + n.bin + n.normal + 1):
+               (n.biomark + n.bin + n.normal + n.multilevel)] <-
+      cat_columns
+  }
+  
+  # names if none provided
+  if(is.null(colnames(correlation.matrix))){
+    colnames(gen_data)[1:n.biomark] <- paste0("Bmk", LETTERS[1:n.biomark])
+  }
+  
+  # Interactions, Bmk * Trt, create the names then the calculation
+  bmk.names <- colnames(gen_data[1:n.biomark])
+  bmk.int.names <- paste0(bmk.names, "_treatment_int")
+  gen_data[, bmk.int.names] <- gen_data$treatment*gen_data[,bmk.names]
+  
+  # Center continuous data
+  if(n.normal > 0){
+    gen_data.scaled <- as.data.frame(cbind(gen_data[,1:(n.biomark+n.bin)],
+                                           scale(gen_data[, (n.biomark+n.bin+1):(n.biomark+n.bin+n.normal)],
+                                                 center = TRUE, scale = FALSE),
+                                           # Treatment and interactions
+                                           gen_data[, (n.biomark+n.bin+n.normal+1):(n.biomark+n.bin+n.normal+n.multilevel+n.biomark)]))
+  }else{
+    gen_data.scaled <- data.frame(gen_data[,1:(n.biomark+n.bin)],
+                                  # Treatment and interactions
+                                  gen_data[, (n.biomark+n.bin+n.normal+1):(n.biomark+n.bin+n.normal+n.multilevel+n.biomark)])
+  }
+  # Added 06092020
+  # Create dummy variables for multiplying
+  if(n.multilevel > 0 ){
+    
+    # Grab the multi-level columns
+    multi_cols <- 
+      as.data.frame(gen_data.scaled[, (n.biomark + n.bin + n.normal + 1):
+                                      (n.biomark + n.bin + n.normal + n.multilevel)])
+    names(multi_cols) <- names(gen_data)[(n.biomark + n.bin + n.normal + 1):(n.biomark + n.bin + n.normal + n.multilevel)]
+    
+    # Create Dummy columns - intercept not needed
+    dummy_cols <- model.matrix(~., data = multi_cols) %>% 
+      as.data.frame() %>% select(-`(Intercept)`)
+    
+    # Remove the multi-levels columns to replace with dummy columns
+    gen_data.scaled[, (n.biomark + n.bin + n.normal + 1):
+                      (n.biomark + n.bin + n.normal + n.multilevel)] <-  NULL
+    
+    # Put in order: biomarkers, trt, X bin, X cont, X multi, trt:bmk int
+    col_order <- c(1:(n.biomark+n.bin+n.normal), 
+                   # Multilevel got put at end
+                   (n.biomark+n.bin+n.normal+n.biomark + 1):(n.biomark+n.bin+n.normal+n.biomark + ncol(dummy_cols)),
+                   # Trt:bmk int
+                   (n.biomark+n.bin+n.normal+ 1):(n.biomark+n.bin+n.normal+n.biomark))
+    
+    # Put together and into order for linear combination
+    gen_data.scaled <- cbind(gen_data.scaled, dummy_cols)
+    gen_data.scaled <- gen_data.scaled[, col_order]
+  }
+  
+  # Baseline hazard
+  lambda0 <- 1
+  # (log HR) Beta * X
+  lincomb <- rowSums(mapply('*', log(c(biomark.HR, covariate.HRs,interaction.HR)), gen_data.scaled))
+  lambdai <- lambda0*exp(lincomb)
+  
+  # Censor Time can be different for Exposed and non Exposed
+  case.propE1 <- case.prop
+  case.propE0 <- case.prop
+  
+  Survival.true <- rexp(n.rows, rate = lambdai)
+  
+  exp.func <- function(x) rexp(n = 1, rate = x)
+  
+  exp.name <- names(gen_data.scaled)[1] 
+  
+  gen_data.scaled <- gen_data.scaled %>% 
+    # Censor times distributed the same regardless of exposure status
+    mutate(Censor.true = sapply(lambdai*((1 - case.prop)/case.prop), exp.func))
+  
+  # # Censor Time can be different for Exposed and non Exposed, but is currently the same
+  # CODE SAVED FOR POTENTIAL REUSE
+  # mutate(Censor.true = ifelse(!!as.name(exp.name) == 1,
+  #                             sapply(lambdai*((1 - case.propE1) / 
+  #                                               case.propE1),
+  #                                    exp.func),
+  #                             sapply(lambdai*((1 - case.propE0) / 
+  #                                               case.propE0),
+  #                                    exp.func)))
+  
+  # Observed Time
+  Obs.time <- pmin(Survival.true,gen_data.scaled$Censor.true)
+  
+  # If Observed time < Censoring Time then we observed a Case
+  Case.status <- as.numeric(Obs.time < gen_data.scaled$Censor.true)
+  
+  gen_data$Case <- Case.status
+  gen_data$Time <- Obs.time
+  
+  # Create a subject ID
+  gen_data$ID <- paste0("Subj",seq(1,nrow(gen_data),1))
+  
+  
+  
+  return(gen_data)
+}
+
+source(file.path(source.path, "NCC_matching_function_WLC_05202020.R"))
+### Description: Function to take cohort data and match returning a nested case control dataset
+
+
+
+# Function for Nested Case Control Matching
+NCC_matching <- function(data.input.raw,
+                         M = 1,
+                         case.var = "Case",
+                         time.var = "Time",
+                         ID.var = "ID",
+                         cat.matchingvars = NULL,
+                         cont.matchingvars = NULL,
+                         cont.matching.int = NULL,
+                         IPW = FALSE,
+                         coxph_match = FALSE,
+                         coxph_vary = FALSE){
+  # Takes a full cohort's data and returns a Nested Case Control dataset
+  #  
+  # Args: 
+  #  data.input:  The cohort data to do NCC matching on
+  #  M: The number of controls per case
+  #  case.var:  The name of the variable that indicates if a obs is a case or not
+  #  ID.var:  The name of the identifier variable
+  #  cat.matchingvars: The names of categorical matching variables
+  #  cont.matchingvars: The names of continuous matching variables
+  #  cont.matching.int:  The +/- range for each continuous matching variable. e.g. 3 means +/- 3 units
+  #  IPW: If inverse probability weighting calculation should be done and returned
+  #  coxph_match: If matching should be done on scores based on a CoxPH model TRUE/FALSE
+  #  coxph_vary:  When matching on CoxPH scores, should matching interval vary with time? TRUE/FALSE   
+  
+  require(tidyverse)
+  require(survival)
+  require(pec)
+  # New 05/20/2020
+  data.input <- as.data.frame(data.input.raw)
+  # Cases dataset - only cases
+  cases <- data.input[(data.input[,case.var] == 1), ]
+  n.cases <- nrow(cases)
+  
+  # Know what case the controls were matched to for creating Sets
+  #  Cases "matched" to themself
+  cases$case_matched <- cases[,ID.var]
+  
+  
+  # How many categorical/Continuous matching vars
+  l.cat <- length(cat.matchingvars)
+  l.cont <- length(cont.matchingvars)
+  
+  # Create Nested Case Control matching
+  # Case Control Data frame initialization
+  cc.data <- data.frame()
+  
+  n.risk.tally <- rep(NA,n.cases)
+  
+  ## New 5/20/2020
+  if(coxph_match){
+    all.match.vars <- c(cat.matchingvars, cont.matchingvars)
+    x.side <- paste0(all.match.vars,
+                     collapse = " + ")
+    y.side <- paste0("Surv(", time.var, ", ", case.var,")")
+    full_cohort.coxph <- coxph(as.formula(paste0(y.side, " ~ ", x.side)), data = data.input, x = TRUE)
+  }
+  
+  ## End new 5/20/2020
+  
+  # Function to sample from risk sets for matching
+  riskset_sampling <- function(case){
+    data.input.copy <- as.data.frame(data.input)
+    # Put Case as dataframe
+    case <- as.data.frame(case)
+    
+    # Index of which obs from the cohort are in the riskset
+    riskset.index <- which((data.input.copy[,time.var] >=  case[,time.var]) &
+                             (data.input.copy[,ID.var] != case[,ID.var]) )
+    
+    ## New 5/20/2020
+    if(coxph_match){
+      # If coxph matching get predicted probability at the case's time.
+      cases.time <- case[, time.var]
+      # Full data
+      data.input.copy$surv.prob <- 
+        predictSurvProb(object = full_cohort.coxph,
+                        newdata = data.input.copy,
+                        times = cases.time)
+      # Case data
+      case$surv.prob <- 
+        predictSurvProb(object = full_cohort.coxph,
+                        newdata = case,
+                        times = cases.time)
+      #  categorical, 1 continuous matching var
+      l.cat <- 0
+      l.cont <- 1
+      cat.matchingvars <- NULL
+      cont.matchingvars <- "surv.prob"
+      # 
+      if(coxph_vary){
+        # Update matching interval with time 
+        # if p > 0.5 use x*p*(1-p)
+        # p <= 0.5 use x*0.5*0.5
+        cont.matching.int <- cont.matching.int*ifelse(case$surv.prob > 0.5,
+                                                      case$surv.prob*(1-case$surv.prob),
+                                                      0.5*0.5)
+      }
+      # Make sure its a dataframe and not data.table
+      data.input.copy <- as.data.frame(data.input.copy)
+      case <- as.data.frame(case)
+    }
+    ## End New 5/20/2020
+    
+    # Additional matching
+    # Loop through to write matching code
+    matching.code <- character(l.cat+l.cont)
+    cat_match_code <- function(k){paste0('data.input.copy[, (cat.matchingvars[',
+                                         k,"])] == case[, (cat.matchingvars[",k,"])]")}
+    con_match_code <- function(w){paste0("abs(data.input.copy[, (cont.matchingvars[",w,"])] - ",
+                                         "case[, (cont.matchingvars[",w,"])]) <= ",
+                                         "abs((cont.matching.int[",w,"]))")
+    }
+    if(l.cat > 0 ){
+      matching.code <- sapply(1:l.cat, cat_match_code)
+    }
+    if(l.cont > 0){
+      matching.code <- c(matching.code, sapply(1:l.cont, con_match_code))
+    }
+    if (l.cat + l.cont > 0){
+      # Collapse matching filters into a single string of code 
+      if(l.cat == 0){
+        # if no categorical matching then first element is blank - remove to avoid extra &
+        match.code <- paste(matching.code[-1], collapse = " & ")
+      }else{
+        match.code <- paste(matching.code, collapse = " & ")
+      }
+      # Initial risk set filter plus matching filters
+      risk.set.eval <- paste(c('data.input.copy[,(time.var)] >=  case[, (time.var)]',
+                               'data.input.copy[ ,(ID.var)] != case[, (ID.var)]',
+                               match.code),
+                             collapse = " & ")
+      
+      # Overwrites riskset index if there is matching
+      riskset.index <- which(eval(parse(text = risk.set.eval)))
+      
+    }
+    
+    n.risk <- length(riskset.index)
+    n.risk.tally <- n.risk
+    # Case must have at least k potential matches to be included
+    if (M <= n.risk) {
+      
+      # Sample M controls from the risk set indexes, record which case it was matched to 
+      samp.index <- sample(riskset.index, M, replace = FALSE)
+      # Matched controls
+      control.matches <- data.input.copy[samp.index, ] 
+      # Controls are not cases at this time
+      control.matches[ , case.var] <- 0
+      control.matches$case_matched <- case[, ID.var]
+      # Bind together data from past iterations and the new case control match
+      cc.data <- rbind(case,control.matches) 
+      
+      
+    }
+    return(cc.data)
+  }
+  
+  # List of cases
+  lcases <- lapply(1:dim(cases)[1], function(x) cases[x,])
+  # Bind into NCC data
+  cc.data <- bind_rows(lapply(lcases, riskset_sampling))
+  cc.data$Set <- as.numeric(factor(rank(cc.data$case_matched)))
+  
+  # Stop if no matches were found for any case
+  if(nrow(cc.data) == 0){
+    stop("Matching criteria is too narrow, no matches were found for any case")
+  }
+  
+  # IPW calculations are KM probabilities from STOER & SAMUELSEN
+  # Not using currently, but may be useful in future. - likely better as a separate function but can work within this code
+  
+  # if (IPW == TRUE) {
+  #   require(multipleNCC)
+  #   # Datast for acquiring probabilities 
+  #   ipw_data <- cc.data %>% 
+  #     group_by(!!as.name(ID.var)) %>%
+  #     summarize(samp_stat = max(!!as.name(case.var)) + 1) %>%
+  #     right_join(data.input) %>% 
+  #     mutate(samp_stat = ifelse(is.na(samp_stat),0,samp_stat))
+  #   
+  #   # Categorical and continuous matching
+  #   if (l.cat > 0 & l.cont > 0){
+  #     #assemble matching variables
+  #     #  matchers <- data.frame(getvar("data.input",cat.matchingvars[1]))
+  #     matchers <- data.input[, c(cat.matchingvars,cont.matchingvars)]
+  #     # if(l.cat > 1){
+  #     #   for(c in 2:l.cat){
+  #     #     matchers <- cbind(matchers, getvar("data.input",cat.matchingvars[c]))
+  #     #   }
+  #     # }
+  #     # match.calip <- vector()
+  #     match.calip <- rep(cont.matching.int,each = 2)*c(-1,1)
+  #     # for(q in 1:l.cont){
+  #     #   matchers <- cbind(matchers, getvar("data.input",cont.matchingvars[q]))
+  #     #   match.calip <- c(match.calip,c(-1,1)*cont.matching.int[q])
+  #     # }
+  #     matchers.int <- c(rep(0,2*l.cat), match.calip)
+  #     # 
+  #     # Calculate inclusion probabilites using the KM formula
+  #     ipw_data$prob_i <- KMprob(survtime = getvar("ipw_data",time.var),
+  #                               samplestat = ipw_data$samp_stat,
+  #                               m = M,
+  #                               match.var = matchers,
+  #                               match.int = matchers.int)
+  #   } else 
+  #     if (l.cat > 0 & l.cont == 0){
+  #       matchers <- data.frame(getvar("data.input",cat.matchingvars[1]))
+  #       if (l.cat > 1){
+  #         for(c in 2:l.cat){
+  #           matchers <- cbind(matchers, getvar("data.input",cat.matchingvars[c]))
+  #         }
+  #       }
+  #       matchers.int <- c(rep(0,2*l.cat))
+  #       
+  #       # Calculate inclusion probabilites using the KM formula
+  #       ipw_data$prob_i <- KMprob(getvar("ipw_data",time.var),
+  #                                 ipw_data$samp_stat, m = M,
+  #                                 match.var = matchers,
+  #                                 match.int = matchers.int)
+  #     } else
+  #       if ( l.cat == 0 & l.cont > 0){
+  #         match.calip <- vector()
+  #         matchers <- data.frame(getvar("data.input",cont.matchingvars[1]))
+  #         if(l.cont > 1){
+  #           for(q in 2:l.cont){
+  #             matchers <- cbind(matchers, getvar("data.input",cont.matchingvars[q]))
+  #             match.calip <- c(match.calip,c(-1,1)*cont.matching.int[q])
+  #           }
+  #         }
+  #         # Calculate inclusion probabilites using the KM formula
+  #         ipw_data$prob_i <- KMprob(getvar("ipw_data",time.var),
+  #                                   ipw_data$samp_stat, m = M,
+  #                                   match.var = matchers,
+  #                                   match.int = match.calip)
+  #         
+  #       }else {
+  #         
+  #         # Calculate inclusion probabilites using the KM formula
+  #         ipw_data$prob_i <- KMprob(getvar("ipw_data",time.var),
+  #                                   ipw_data$samp_stat, m = M)
+  #       }
+  #   
+  #   cc.data <- left_join(cc.data,select(ipw_data, !!as.name(ID.var), prob_i))
+  #   
+  #   
+  # }
+  
+  return(cc.data)
+  
+}
+
+
+# Setup and Generate Data -------------------------------------------------
+
+# Correlation matrix
+n.bmk <- 1
+n.cvts <- 4
+c.mat <- matrix(0, nrow = 1 + 4 + 1, ncol = 1 + 4 + 1)
+diag(c.mat) <- 1
+colnames(c.mat) <- c("Bmk1","treatment",paste0("X",1:(4)))
+rownames(c.mat) <- colnames(c.mat)
+
+# Correlate covariates to biomarker
+c.mat[1:n.bmk,(n.bmk+2):(n.bmk+n.cvts+1)] <- c(1.2, 1.4, 0.1, 0.7)
+c.mat[(n.bmk+2):(n.bmk+n.cvts+1),1:n.bmk] <- c(1.2, 1.4, 0.1, 0.7)
+c.mat <- make.positive.definite(c.mat) # convert the matrix to positive definite.
+c.mat <- cov2cor(c.mat) # make correlation in feasible ranges
+
+# at least S = 1000(?) simulations (cohorts) needed to control randomness 
+# Simulate the Cohorts  
+cohort.full <- generate_data(n.rows = 4580,
+                             n.biomark = 1,
+                             p.biomark = 0.5,
+                             n.bin = 2 + 1, # Plus 1 for treatment
+                             bin.props = rep(0.5, 2 + 1),
+                             n.normal = 0,
+                             normal.means = NULL,
+                             normal.sds = NULL,
+                             n.multilevel = 2,
+                             multi.levels = c(3,3),
+                             multi.props = NULL,
+                             biomark.HR = 0.7,
+                             case.prop = 390/4580,
+                             correlation.matrix = c.mat,
+                             covariate.HRs = c(0.73, 1.5, 2, .4, .6, .75, .5),
+                             interaction.HR = 0.6)
+
+# coxph(Surv(Time, Case) ~ treatment + Bmk1 + treatment:Bmk1 + X1 + X2 + X3 + X4, data = cohort.full)
+
+
+# Block Randomization -----------------------------------------------------
+
+library(survival)
+library(SimDesign) 
+library(lcmix) # install.packages("lcmix", repos="http://R-Forge.R-project.org")
+library(plyr)
+library(dplyr)
+library(foreach)
+library(doParallel)
+library(ggplot2)
+library(survminer)
+library(ISLR)
+library(cluster)
+library(Rtsne)
+library(cba)
+library(GA)
+library(gridExtra)
+
+smaller.cohort <- cohort.full[sample(1:4580, 500), ]
+
+smaller.cohort1 <- smaller.cohort %>% 
+  dplyr::mutate(X3B = (X3 == "B"),
+                X3C = (X3 == "C"),
+                X4B = (X4 == "B"),
+                X4C = (X4 == "C")) %>% 
+  dplyr::select(-X3, -X4)
+
+source("J:/EL/ABEMACICLIB/SOW_037/PROGRAMS/BlockRandomizationFunc.R")
+
+
+## leaf ordered clustering with weights and optimal # clusters
+wt_lf_opt_cluster <- function(
+  ## a string of weights of variables for distance calculation
+  ## weights should be >= 1
+  wts,
+  ## number of batches
+  # nbat=4,
+  ## batch size
+  batsize=70,
+  ## number of clusters, can be number or "opt"
+  nclus="opt",
+  ## event/censor variables must be logical/numeric, can't be factor/character
+  ## make sure the class of each column is correct, different class of variable will get different evaluation statistic
+  use_dat,
+  ## variables used for distance calculation
+  dist_var=NULL,
+  seed=1) {
+  
+  set.seed(seed)
+  
+  ## standardize weights
+  # wts2 <- wts/sum(wts)
+  
+  ## extract data for distance calculation
+  dist_dat <- use_dat %>%
+    dplyr::select(one_of(dist_var))
+  
+  ## change warnType = TRUE to debug
+  gower_dist <- daisy(dist_dat, metric = "gower", weights = wts, warnType = FALSE) # look for the weights and "standardization"
+  clusters <- hclust(gower_dist, method = "single")
+  
+  opt_od <- order.optimal(gower_dist, clusters$merge)$order
+  
+  use_dat_opt_od <- use_dat[opt_od, ]
+  
+  ## define the number of batches
+  if (TRUE){
+    
+    samp_remain <- nrow(use_dat) %% batsize
+    
+    nbat <- ifelse(samp_remain==0,
+                   nrow(use_dat) %/% batsize,
+                   nrow(use_dat) %/% batsize+1)
+    
+  }
+  
+  ## generate cluster IDs
+  if (TRUE) {
+    ## get optimized number of clusters
+    if (nclus == "opt") {
+      ## remainder
+      cur_mod <- nrow(use_dat) %% nbat
+      ## greatest divisor
+      cur_gd <- nrow(use_dat) %/% nbat
+      
+      cluster_id1 <- seq(1, cur_gd) %>% rep(each = nbat)
+      
+      if (cur_mod == 0) {
+        final_cluster_id <- cluster_id1
+      } else {
+        ## add the remainders to an additional last cluster
+        final_cluster_id <- c(cluster_id1, rep(cur_gd + 1, cur_mod))
+      }
+    } else {
+      ## manually define number of clusters
+      ## nclus should be a number here
+      
+      ## remainder
+      cur_mod <- nrow(use_dat) %% nclus
+      ## greatest divisor
+      cur_gd <- nrow(use_dat) %/% nclus
+      
+      cluster_id1 <- seq(1, nclus) %>% rep(each = cur_gd)
+      
+      if (cur_mod == 0) {
+        final_cluster_id <- cluster_id1
+      } else {
+        ## add the remainders to an additional last cluster
+        final_cluster_id <- c(cluster_id1, rep(nclus + 1, cur_mod))
+      }
+    }
+  }
+  
+  ## allocate samples of each cluster into batches
+  if (TRUE) {
+    ## remainder
+    cur_mod <- nrow(use_dat) %% nbat
+    ## greatest divisor, # clusters
+    cur_gd <- nrow(use_dat) %/% nbat
+    
+    ran <- runif(nrow(use_dat), 0, 1)
+    
+    samp_dat01 <- cbind(use_dat_opt_od, final_cluster_id, ran)
+    samp_dat02 <- samp_dat01 %>%
+      dplyr::arrange(
+        final_cluster_id,
+        ran
+      )
+    
+    ## cur_mod==0 means # samples in each cluster is exacly balanced, no remainders.
+    if (cur_mod == 0) {
+      batch <- rep(1:nbat, cur_gd)
+    } else {
+      batch <- c(
+        rep(1:nbat, cur_gd),
+        sample(1:nbat, cur_mod)
+      )
+    }
+    
+    sub_samp_dat <- samp_dat03 <- cbind(samp_dat02, batch) #%>%
+    # dplyr::select(-final_cluster_id, -ran)  ###### ONLY CHANGE 
+  }
+  return(sub_samp_dat)
+}
+
+# nbat <- input$nbat
+batsize <- 70 ### Number of clusters? 
+nclus <- "opt" # input$nclus
+dat <- smaller.cohort1
+dist_var <- c("Case", "Time")
+surv_time_var <- "Time"
+event_var <- "Case"
+cont_var <- NULL
+cate_var <- c("X1", "X2", "X3B", "X3C", "X4B", "X4C")
+
+# !!!!!!!!!!!!!!!!!!!!!!!!
+eval_mtrc_wts <- rep(1, length(c(surv_time_var, cont_var, cate_var)))
+
+
+popSize <- 30 #input$popSize
+maxiter <- 30 #input$maxiter
+run <- 20 #input$run
+elitism <- max(1, round(0.05 * popSize)) #max(1, round(input$elitism * popSize))
+pcrossover <- 0.8 #input$pcrossover
+pmutation <- 0.8 #input$pmutation
+seed <- 666 #input$seed
+
+
+
+t1 <- proc.time()
+is.GA <- TRUE
+if (is.GA) {
+  # withProgress(message = 'GA | iter =', value = 0, {
+    ga_opt <- ga(
+      type = "real-valued",
+      fitness = function(x) ga_evalfun(
+        wts = x,
+        # nbat = nbat,
+        batsize = batsize,
+        nclus = nclus,
+        use_dat = dat,
+        dist_var = dist_var,
+        surv_time_var = surv_time_var,
+        event_var = event_var,
+        cont_var = cont_var,
+        cate_var = cate_var,
+        eval_mtrc_wts = eval_mtrc_wts,
+        seed = seed
+      ),
+      ## lower bound of weights
+      ## attention!!! all weights=0 will cause error in calculating distance.
+      #min = rep(1, length(dist_var)),
+      lower = rep(1, length(dist_var)),
+      ## upper bound of weights
+      #max = rep(100, length(dist_var)),
+      upper = rep(100, length(dist_var)),
+      ## the population size for GA.
+      popSize = popSize,
+      ## the maximum number of iterations to run before the GA search is halted.
+      maxiter = maxiter,
+      ## the number of consecutive generations without any improvement in the best fitness value before the GA is stopped.
+      run = run,
+      ## the number of best fitness individuals to survive at each generation. By default the top 5% individuals will survive at each iteration.
+      elitism = elitism,
+      ## the probability of crossover between pairs of chromosomes. Typically this is a large value and by default is set to 0.8.
+      pcrossover = pcrossover,
+      ## the probability of mutation in a parent chromosome. Usually mutation occurs with a small probability, and by default is set to 0.1.
+      pmutation = pmutation,
+      parallel = FALSE,
+      monitor = gaMonitor,
+      seed = seed # dat_id * 33 + 2
+    )
+  # })
+  
+  ## the value(s) of the decision variables giving the best fitness at the final iteration.
+  ## sometimes, there are >=2 optimal solutions, we choose 1 as the optimal
+  opt_wts <- ga_opt@solution[1, ]
+} else {
+  opt_wts <- rep(1, length(dist_var))
+}
+names(opt_wts) <- dist_var
+
+## use the optimal weight for randomization
+rand_dat <- wt_lf_opt_cluster(
+  ## a string of weights of variables for distance calculation
+  wts = opt_wts,
+  ## number of batches
+  # nbat = nbat,
+  batsize = batsize,
+  ## number of clusters, can be number of "opt"
+  nclus = nclus,
+  use_dat = dat,
+  dist_var = dist_var,
+  seed = seed
+)
+
+# 
+# #### evaluation
+# eval_out <- eval_fun(
+#   all_sub_samp_dat = rand_dat,
+#   surv_time_var = surv_time_var,
+#   event_var = event_var,
+#   cont_var = cont_var,
+#   cate_var = cate_var,
+#   eval_mtrc_wts = eval_mtrc_wts,
+#   paral_core = NULL
+# )
+# 
+# ## evaluation plots
+# eval_plot <- eval_plot_fun(
+#   all_sub_samp_dat = rand_dat,
+#   surv_time_var = surv_time_var,
+#   event_var = event_var,
+#   cont_var = cont_var,
+#   cate_var = cate_var,
+#   plot.ft.size = 18
+# )
+# 
+# list.obj <- list(rand.dat = rand_dat, wts = opt_wts)
+# 
+# t2 <- proc.time()
+# # (t2 - t1)
+# tt <- as.numeric(t2 - t1)[3] %>% t() %>% as.data.frame()
+# colnames(tt) <- "Running time"
+# 
+# 
+# # Code to mutate cohort.full to get block column for matching
+# eval_fun(all_sub_samp_dat = smaller.cohort, surv_time_var = "Time", event_var = "Case", )
+
+
+
+
+# Select the NCC ----------------------------------------------------------
+# Exact matching on X1, X2, X3, X4 - will be replaced by single block column
+NCC.subsample <- 
+  NCC_matching(cohort.full,
+               M = 3,
+               case.var = "Case",
+               time.var = "Time",
+               ID.var = "ID",
+               cat.matchingvars = c("X1", "X2" ,"X3", "X4")) 
+
+NCC.subsample.BR <- 
+  NCC_matching(rand_dat,
+               M = 3,
+               case.var = "Case",
+               time.var = "Time",
+               ID.var = "ID",
+               cat.matchingvars = c("final_cluster_id")) 
+
+# clogit(Case ~ treatment + Bmk1 + treatment:Bmk1 + strata(Set), data = NCC.subsample.BR)
